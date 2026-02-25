@@ -1,0 +1,89 @@
+name: Update Chain Daily Data
+
+on:
+  schedule:
+    - cron: "40 * * * *"
+  workflow_dispatch:
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      # -----------------------------
+      # Checkout full history
+      # -----------------------------
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # -----------------------------
+      # Git Setup
+      # -----------------------------
+      - name: Configure Git
+        run: |
+          git config user.name "GitHub Action"
+          git config user.email "actions@github.com"
+
+      # -----------------------------
+      # Reliable Rebase (Retry 5x)
+      # -----------------------------
+      - name: Pull latest with retry
+        run: |
+          for i in {1..5}; do
+            git pull --rebase origin main && break
+            echo "Rebase failed… retrying ($i/5)"
+            sleep 2
+          done
+
+      # -----------------------------
+      # Python Setup
+      # -----------------------------
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          pip install requests pytz
+
+      # -----------------------------
+      # Run the update script
+      # -----------------------------
+      - name: Run update script
+        run: python3 monthly_chains_bo.py
+
+      # -----------------------------
+      # Commit + Push (Full Retry Safe)
+      # -----------------------------
+      - name: Commit & Push if Changed (Ultra-Safe)
+        run: |
+          git add -A
+
+          if git diff --cached --quiet; then
+            echo "✔ No changes to commit."
+            exit 0
+          fi
+
+          echo "📌 Changes detected — committing..."
+          git commit -m "Auto update Monthly Chains Data | $(TZ='Asia/Kolkata' date '+%d %b %Y, %I:%M %p IST')"
+
+          echo "⬆ Pushing safely with retries..."
+          for i in {1..5}; do
+            # Always ensure latest remote state
+            git pull --rebase origin main || true
+
+            # Try pushing
+            git push --force-with-lease origin main && success=true && break
+
+            echo "❌ Push failed… retrying ($i/5)"
+            sleep 3
+          done
+
+          if [ "$success" != true ]; then
+            echo "⚠ Push failed after retries, but workflow will NOT fail."
+          fi
