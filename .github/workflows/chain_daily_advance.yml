@@ -1,0 +1,52 @@
+name: Update Chain Daily Advance
+
+on:
+  schedule:
+    - cron: "*/40 * * * *"   # runs every 40 minutes
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 📁 Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # REQUIRED so git pull works
+
+      - name: 🐍 Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: 📦 Install Dependencies
+        run: |
+          pip install requests pytz
+
+      - name: ▶ Run Script
+        run: python3 chain_daily_advance.py
+
+      - name: 🔄 Commit & Push if Changes Exist
+        run: |
+          git config user.name "GitHub Action"
+          git config user.email "actions@github.com"
+
+          git add -A
+
+          if git diff --cached --quiet; then
+            echo "✔ No changes — nothing to commit"
+            exit 0
+          fi
+
+          echo "📌 Changes found — committing"
+          git commit -m "Auto-update Chain Daily Advance | $(TZ='Asia/Kolkata' date '+%d %b %Y, %I:%M %p IST')"
+
+          echo "🔍 Syncing with remote..."
+          git pull --rebase || git pull --allow-unrelated-histories
+
+          echo "🚀 Pushing changes..."
+          git push || git push --force
