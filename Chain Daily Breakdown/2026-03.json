@@ -2,13 +2,71 @@
   "The Kerala Story 2 Goes Beyond | Hindi": {
     "2026-03-01": {
       "Maxus Cinemas": [
+        6,
+        111,
         3,
+        31969,
+        5.7
+      ],
+      "MovieMax": [
+        5,
+        33,
+        5,
+        5510,
+        2.41
+      ],
+      "INOX": [
+        1,
+        3,
+        1,
+        680,
+        1.17
+      ]
+    }
+  },
+  "Assi | Hindi": {
+    "2026-03-01": {
+      "Maxus Cinemas": [
+        1,
+        13,
+        1,
+        3237,
+        22.41
+      ]
+    }
+  },
+  "Mardaani 3 | Hindi": {
+    "2026-03-01": {
+      "MovieMax": [
+        1,
         0,
-        2,
+        1,
         0,
         0.0
       ]
     }
   },
-  "lastUpdated": "04:23 AM, 01 March 2026"
+  "Scream 7 | English": {
+    "2026-03-01": {
+      "Maxus Cinemas": [
+        1,
+        0,
+        1,
+        0,
+        0.0
+      ]
+    }
+  },
+  "Thaai Kizhavi | Tamil": {
+    "2026-03-01": {
+      "MovieMax": [
+        1,
+        1,
+        1,
+        250,
+        0.32
+      ]
+    }
+  },
+  "lastUpdated": "05:22 AM, 01 March 2026"
 }
