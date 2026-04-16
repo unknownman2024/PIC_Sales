@@ -27567,6 +27567,15 @@
         20585,
         1.97
       ]
+    },
+    "2026-04-17": {
+      "Maxus Cinemas": [
+        1,
+        0,
+        1,
+        0,
+        0.0
+      ]
     }
   },
   "LIK: Love Insurance Kompany | Telugu": {
@@ -31165,6 +31174,15 @@
         341269,
         26.8
       ]
+    },
+    "2026-04-17": {
+      "Maxus Cinemas": [
+        4,
+        123,
+        4,
+        31427,
+        8.96
+      ]
     }
   },
   "Nilgiris: A Shared Wilderness | English": {
@@ -31211,5 +31229,34 @@
       ]
     }
   },
-  "lastUpdated": "03:53 AM, 17 April 2026"
+  "Lee Cronin's The Mummy | English": {
+    "2026-04-17": {
+      "Cinepolis": [
+        1,
+        10,
+        1,
+        1000,
+        5.85
+      ],
+      "Maxus Cinemas": [
+        1,
+        0,
+        1,
+        0,
+        0.0
+      ]
+    }
+  },
+  "Lee Cronin's The Mummy | Hindi": {
+    "2026-04-17": {
+      "Maxus Cinemas": [
+        1,
+        0,
+        1,
+        0,
+        0.0
+      ]
+    }
+  },
+  "lastUpdated": "04:53 AM, 17 April 2026"
 }
