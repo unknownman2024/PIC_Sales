@@ -3525,6 +3525,15 @@
         27400,
         100.0
       ]
+    },
+    "2026-04-28": {
+      "PVR": [
+        1,
+        38,
+        1,
+        11362,
+        39.58
+      ]
     }
   },
   "Prathichaya | Malayalam": {
@@ -45615,6 +45624,15 @@
         0,
         0.0
       ]
+    },
+    "2026-04-28": {
+      "Maxus Cinemas": [
+        1,
+        111,
+        1,
+        23089,
+        28.24
+      ]
     }
   },
   "Nilgiris: A Shared Wilderness | English": {
@@ -57322,5 +57340,5 @@
       ]
     }
   },
-  "lastUpdated": "03:08 AM, 28 April 2026"
+  "lastUpdated": "04:02 AM, 28 April 2026"
 }
