@@ -1,5 +1,5 @@
 {
-  "lastUpdated": "05:13 AM, 25 May 2026",
+  "lastUpdated": "09:28 AM, 25 May 2026",
   "Ek Din [2D | Hindi]": {
     "2026-05-01": {
       "CINEPOLIS": [
@@ -56092,6 +56092,26 @@
         11,
         11051.37,
         1.88
+      ]
+    },
+    "2026-05-30": {
+      "CINEPOLIS": [
+        6,
+        0,
+        6,
+        0,
+        0.0
+      ]
+    }
+  },
+  "Kuch Alfaaz by Nitinn R Miranni [Normal | Hindi]": {
+    "2026-05-30": {
+      "PVR": [
+        1,
+        35,
+        1,
+        31659.44,
+        20.0
       ]
     }
   }
