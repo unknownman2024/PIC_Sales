@@ -40551,6 +40551,15 @@
         794.4,
         3.41
       ]
+    },
+    "2026-05-29": {
+      "Maxus Cinemas": [
+        1,
+        0,
+        1,
+        0,
+        0.0
+      ]
     }
   },
   "M4M - Motive for Murder | Telugu": {
@@ -67427,6 +67436,15 @@
         372439,
         19.03
       ]
+    },
+    "2026-05-29": {
+      "INOX": [
+        1,
+        2,
+        1,
+        360,
+        0.75
+      ]
     }
   },
   "Drishyam 3 | Kannada": {
@@ -73754,5 +73772,16 @@
       ]
     }
   },
-  "lastUpdated": "02:28 AM, 29 May 2026"
+  "The Great Grand Superhero - Aliens Ka Aagman | Hindi": {
+    "2026-05-29": {
+      "Maxus Cinemas": [
+        1,
+        6,
+        1,
+        894,
+        5.26
+      ]
+    }
+  },
+  "lastUpdated": "07:03 AM, 29 May 2026"
 }
