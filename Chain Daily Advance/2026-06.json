@@ -1,5 +1,5 @@
 {
-  "lastUpdated": "10:29 AM, 29 May 2026",
+  "lastUpdated": "02:18 PM, 29 May 2026",
   "Karuppu [2D | Tamil]": {
     "2026-06-02": {
       "PVR": [
@@ -76,6 +76,28 @@
         1,
         8539.35,
         12.13
+      ]
+    }
+  },
+  "Veerabhadrudu [2D | Telugu]": {
+    "2026-06-01": {
+      "INOX": [
+        2,
+        106,
+        1,
+        10600,
+        15.36
+      ]
+    }
+  },
+  "Trikala [The Unborn Warrior] [2D | Telugu]": {
+    "2026-06-01": {
+      "INOX": [
+        2,
+        106,
+        1,
+        10600,
+        15.36
       ]
     }
   }
