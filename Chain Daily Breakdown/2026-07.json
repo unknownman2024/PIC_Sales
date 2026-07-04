@@ -9638,6 +9638,15 @@
         7160,
         6.4
       ]
+    },
+    "2026-07-05": {
+      "PVR": [
+        1,
+        0,
+        1,
+        0,
+        0.0
+      ]
     }
   },
   "FIFA World Cup 2026: Portugal vs Croatia | English": {
@@ -11305,5 +11314,16 @@
       ]
     }
   },
-  "lastUpdated": "11:10 PM, 04 July 2026"
+  "FIFA World Cup 2026: Paraguay vs France | english": {
+    "2026-07-05": {
+      "INOX": [
+        1,
+        8,
+        1,
+        1192,
+        6.06
+      ]
+    }
+  },
+  "lastUpdated": "01:19 AM, 05 July 2026"
 }
