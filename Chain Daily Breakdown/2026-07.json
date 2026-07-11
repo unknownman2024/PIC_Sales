@@ -833,6 +833,15 @@
         113610,
         9.82
       ]
+    },
+    "2026-07-12": {
+      "Maxus Cinemas": [
+        1,
+        0,
+        1,
+        0,
+        0.0
+      ]
     }
   },
   "Main Vaapas Aaunga | Hindi": {
@@ -29697,5 +29706,30 @@
       ]
     }
   },
-  "lastUpdated": "03:00 AM, 12 July 2026"
+  "FIFA World Cup 2026: Argentina vs Switzerland (Quarter - Finals) | English": {
+    "2026-07-12": {
+      "PVR": [
+        18,
+        1757,
+        13,
+        479895,
+        52.53
+      ],
+      "Cinepolis": [
+        3,
+        157,
+        3,
+        36580,
+        26.48
+      ],
+      "INOX": [
+        7,
+        748,
+        6,
+        194800,
+        49.34
+      ]
+    }
+  },
+  "lastUpdated": "03:58 AM, 12 July 2026"
 }
