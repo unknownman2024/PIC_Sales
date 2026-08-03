@@ -2,6 +2,8 @@
 import json, os, requests, pytz
 from datetime import datetime, timedelta
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import threading
 
 BASE_URL = "https://districtdata2026.pages.dev/advance"
 OUTPUT_DIR = "Chain Daily Advance"
@@ -15,8 +17,12 @@ BLOCK_RATES = {
     "INOX": 0.0
 }
 
+# Lock for thread-safe printing
+print_lock = threading.Lock()
+
 def log(msg):
-    print("➡", msg)
+    with print_lock:
+        print("➡", msg)
 
 def detect_chain(venue):
     if not venue:
@@ -53,7 +59,7 @@ def decompress_show(arr, dicts):
         "totalSeats": arr[6],
         "available": arr[7],
         "sold": arr[8],
-        "gross": arr[9] / 100.0,          # convert from paisa
+        "gross": arr[9] / 100.0,
         "occupancy": f"{arr[10]/100:.2f}%",
         "minsLeft": arr[11]
     }
@@ -63,7 +69,6 @@ def fetch(date):
     try:
         r = requests.get(url, timeout=12)
         if r.status_code == 200:
-            log(f"📥 Data received for {date}")
             data = r.json()
             # Check for compressed format
             if "dicts" in data and "movies" in data:
@@ -77,9 +82,10 @@ def fetch(date):
             else:
                 # Fallback: old format (direct list of shows per movie)
                 return data
-    except:
-        pass
-    log(f"⚠ No data for {date}")
+        else:
+            log(f"⚠ No data for {date} (HTTP {r.status_code})")
+    except Exception as e:
+        log(f"⚠ Error fetching {date}: {e}")
     return None
 
 def process_day(shows):
@@ -100,11 +106,9 @@ def process_day(shows):
         raw[chain]["venues"].add(s.get("venue", "").strip())
 
     final = {}
-
     for chain, v in raw.items():
         sold, gross = apply_discount(chain, v["sold"], v["gross"], v["seats"])
         occ = round((sold / v["seats"]) * 100, 2) if v["seats"] else 0
-
         final[chain] = {
             "shows": v["shows"],
             "sold": sold,
@@ -112,7 +116,6 @@ def process_day(shows):
             "gross": round(gross, 2),
             "occ": occ
         }
-
     return final
 
 def save(path, structure):
@@ -137,11 +140,8 @@ def process_month(year, month, include_future):
         log(f"🆕 Creating month file {filename}")
 
     today = datetime.now().date()
-
-    # Compute last day of month
     month_end = (datetime(year, month, 28) + timedelta(days=5)).replace(day=1).date() - timedelta(days=1)
 
-    # Apply future buffer only to current month
     if include_future:
         end_date = min(month_end, today + timedelta(days=5))
     else:
@@ -149,41 +149,58 @@ def process_month(year, month, include_future):
 
     current = datetime(year, month, 1).date()
 
+    # Build list of dates to fetch
+    dates_to_fetch = []
     while current <= end_date:
-
-        # 🚨 Strict boundary: NEVER allow future dates into other month files
         if current.month != month:
             break
-
         d = current.strftime("%Y-%m-%d")
 
-        # Skip old processed dates if not future tracking
+        # Skip logic
         if d in month_json and not include_future:
             current += timedelta(days=1)
             continue
-
-        # Skip past dates already saved during future runs
         if d in month_json and current < today and include_future:
             current += timedelta(days=1)
             continue
 
-        log(f"🔎 Fetching {d}")
-        data = fetch(d)
-
-        if data:
-            for movie, shows in data.items():
-                if not isinstance(shows, list):
-                    continue
-
-                stats = process_day(shows)
-                if stats:
-                    month_json.setdefault(movie, {})[d] = {
-                        c: [v["shows"], v["sold"], v["venues"], v["gross"], v["occ"]]
-                        for c, v in stats.items()
-                    }
-                    log(f"✔ Updated {movie} → {d}")
-
+        dates_to_fetch.append(d)
         current += timedelta(days=1)
+
+    if not dates_to_fetch:
+        log(f"✅ No new dates to fetch for {filename}")
+        return
+
+    log(f"🚀 Fetching {len(dates_to_fetch)} dates in parallel (max 50 threads)")
+
+    # Parallel fetch
+    results = {}
+    with ThreadPoolExecutor(max_workers=50) as executor:
+        future_to_date = {executor.submit(fetch, d): d for d in dates_to_fetch}
+        for future in as_completed(future_to_date):
+            d = future_to_date[future]
+            try:
+                data = future.result()
+                if data:
+                    results[d] = data
+                    log(f"✅ {d} fetched")
+                else:
+                    log(f"❌ {d} – no data")
+            except Exception as e:
+                log(f"❌ {d} – error: {e}")
+
+    # Merge results into month_json
+    for d, data in results.items():
+        for movie, shows in data.items():
+            if not isinstance(shows, list):
+                continue
+            stats = process_day(shows)
+            if stats:
+                month_json.setdefault(movie, {})[d] = {
+                    c: [v["shows"], v["sold"], v["venues"], v["gross"], v["occ"]]
+                    for c, v in stats.items()
+                }
+                log(f"✔ Updated {movie} → {d}")
 
     save(path, month_json)
 
