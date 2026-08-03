@@ -3,8 +3,7 @@ import json, os, requests, pytz
 from datetime import datetime, timedelta
 from collections import defaultdict
 
-
-BASE_URL = "https://district24.pages.dev/Daily%20Advance"
+BASE_URL = "https://districtdata2026.pages.dev/advance"
 OUTPUT_DIR = "Chain Daily Advance"
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
@@ -16,10 +15,8 @@ BLOCK_RATES = {
     "INOX": 0.0
 }
 
-
 def log(msg):
     print("➡", msg)
-
 
 def detect_chain(venue):
     if not venue:
@@ -30,21 +27,36 @@ def detect_chain(venue):
             return chain
     return None
 
-
 def apply_discount(chain, sold, gross, seats):
     rate = BLOCK_RATES.get(chain, 0)
-
     if sold > 0 and rate > 0:
         avg_price = gross / sold if sold else 0
         blocked = seats * rate
         adjusted = sold - blocked
-
-        # 🔥 prevent negative values
         sold = max(0, round(adjusted))
         gross = max(0, sold * avg_price)
-
     return sold, gross
 
+def decompress_show(arr, dicts):
+    """Convert compressed array back to show dict using reverse dicts."""
+    reverse = {
+        k: {v: kk for kk, v in dicts[k].items()} for k in dicts
+    }
+    # order: [cityId, stateId, venueId, chainId, timeId, audiId, total, avail, sold, gross, occBp, minsLeft]
+    return {
+        "city": reverse["cities"].get(arr[0], "Unknown"),
+        "state": reverse["states"].get(arr[1], "Unknown"),
+        "venue": reverse["venues"].get(arr[2], "Unknown"),
+        "chain": reverse["chains"].get(arr[3], "Unknown"),
+        "time": reverse["showtimes"].get(arr[4], ""),
+        "audi": reverse["audis"].get(arr[5], ""),
+        "totalSeats": arr[6],
+        "available": arr[7],
+        "sold": arr[8],
+        "gross": arr[9] / 100.0,          # convert from paisa
+        "occupancy": f"{arr[10]/100:.2f}%",
+        "minsLeft": arr[11]
+    }
 
 def fetch(date):
     url = f"{BASE_URL}/{date}_Detailed.json"
@@ -52,13 +64,23 @@ def fetch(date):
         r = requests.get(url, timeout=12)
         if r.status_code == 200:
             log(f"📥 Data received for {date}")
-            return r.json()
+            data = r.json()
+            # Check for compressed format
+            if "dicts" in data and "movies" in data:
+                # Decompress all shows per movie
+                decompressed_movies = {}
+                dicts = data["dicts"]
+                for movie, compressed_list in data["movies"].items():
+                    shows = [decompress_show(arr, dicts) for arr in compressed_list]
+                    decompressed_movies[movie] = shows
+                return decompressed_movies
+            else:
+                # Fallback: old format (direct list of shows per movie)
+                return data
     except:
         pass
-
     log(f"⚠ No data for {date}")
     return None
-
 
 def process_day(shows):
     raw = defaultdict(lambda: {"sold": 0, "gross": 0, "seats": 0, "shows": 0, "venues": set()})
@@ -93,7 +115,6 @@ def process_day(shows):
 
     return final
 
-
 def save(path, structure):
     ist = pytz.timezone("Asia/Kolkata")
     structure["lastUpdated"] = datetime.now(ist).strftime("%I:%M %p, %d %B %Y")
@@ -102,7 +123,6 @@ def save(path, structure):
         json.dump(structure, f, indent=2, ensure_ascii=False)
 
     log(f"💾 Saved → {path}")
-
 
 def process_month(year, month, include_future):
     filename = f"{year}-{month:02d}.json"
@@ -167,13 +187,12 @@ def process_month(year, month, include_future):
 
     save(path, month_json)
 
-
 def main():
     today = datetime.now()
 
     # Process past months normally
     for y in range(2025, today.year + 1):
-        for m in range(9, today.month):
+        for m in range(1, today.month):
             process_month(y, m, include_future=False)
 
     # Process current month with future buffer
@@ -182,7 +201,6 @@ def main():
     # Prepare next month WITHOUT buffer (it will get buffer later when it's current)
     next_month = today.replace(day=28) + timedelta(days=5)
     process_month(next_month.year, next_month.month, include_future=False)
-
 
 if __name__ == "__main__":
     main()
