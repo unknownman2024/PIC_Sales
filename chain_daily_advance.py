@@ -4,7 +4,6 @@ from datetime import datetime, timedelta
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import time
-import threading
 
 BASE_URL = "https://districtdata2026.pages.dev/advance"
 OUTPUT_DIR = "Chain Daily Advance"
@@ -13,24 +12,11 @@ os.makedirs(OUTPUT_DIR, exist_ok=True)
 CHAIN_ORDER = ["PVR", "INOX", "CINEPOLIS"]
 BLOCK_RATES = {"PVR": 0.005, "CINEPOLIS": 0.0325, "INOX": 0.0}
 
-MAX_WORKERS = 30              # Lower concurrency to avoid timeouts
-REQUEST_TIMEOUT = (5, 15)     # connect + read timeout
-RETRY_ATTEMPTS = 2
-
-# For heartbeat
-heartbeat_lock = threading.Lock()
-last_heartbeat = time.time()
+MAX_WORKERS = 80
+REQUEST_TIMEOUT = 10
 
 def log(msg):
     print("➡", msg)
-
-def heartbeat():
-    global last_heartbeat
-    with heartbeat_lock:
-        now = time.time()
-        if now - last_heartbeat > 30:
-            print(f"⏱️ Heartbeat – still running (elapsed: {int(now - start_time)}s)")
-            last_heartbeat = now
 
 def detect_chain(venue):
     if not venue:
@@ -70,28 +56,23 @@ def decompress_show(arr, dicts):
         "minsLeft": arr[11]
     }
 
-def fetch_date_with_retry(date, session):
+def fetch_date(date, session):
     url = f"{BASE_URL}/{date}_Detailed.json"
-    for attempt in range(RETRY_ATTEMPTS + 1):
-        try:
-            resp = session.get(url, timeout=REQUEST_TIMEOUT)
-            if resp.status_code == 404:
-                return None
-            resp.raise_for_status()
-            data = resp.json()
-            if "dicts" in data and "movies" in data:
-                decompressed = {}
-                dicts = data["dicts"]
-                for movie, compressed_list in data["movies"].items():
-                    decompressed[movie] = [decompress_show(arr, dicts) for arr in compressed_list]
-                return decompressed
-            return data
-        except Exception:
-            if attempt < RETRY_ATTEMPTS:
-                time.sleep(1 * (attempt + 1))  # exponential backoff
-            else:
-                return None
-    return None
+    try:
+        resp = session.get(url, timeout=REQUEST_TIMEOUT)
+        if resp.status_code == 404:
+            return None
+        resp.raise_for_status()
+        data = resp.json()
+        if "dicts" in data and "movies" in data:
+            decompressed = {}
+            dicts = data["dicts"]
+            for movie, compressed_list in data["movies"].items():
+                decompressed[movie] = [decompress_show(arr, dicts) for arr in compressed_list]
+            return decompressed
+        return data
+    except Exception:
+        return None
 
 def process_day(shows):
     raw = defaultdict(lambda: {"sold": 0, "gross": 0, "seats": 0, "shows": 0, "venues": set()})
@@ -156,10 +137,8 @@ def load_existing_month(fname):
     return data
 
 def main():
-    global start_time
-    start_time = time.time()
     today = datetime.now().date()
-    start_date = datetime(2025, 9, 1).date()
+    start_date = datetime(2025, 8, 1).date()
     end_date = today + timedelta(days=5)
 
     all_dates = []
@@ -203,25 +182,17 @@ def main():
 
     def fetch_wrapper(date):
         with requests.Session() as session:
-            return date, fetch_date_with_retry(date, session)
+            return date, fetch_date(date, session)
 
     total = len(dates_to_fetch)
     completed = 0
-    # Start a heartbeat thread to print status every 30 seconds
-    def heartbeat_loop():
-        while completed < total:
-            time.sleep(5)
-            with heartbeat_lock:
-                if time.time() - last_heartbeat > 30:
-                    print(f"⏱️ Heartbeat – processed {completed}/{total} ({100*completed//total}%) – still running...")
-    heart_thread = threading.Thread(target=heartbeat_loop, daemon=True)
-    heart_thread.start()
-
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
         futures = {executor.submit(fetch_wrapper, d): d for d in dates_to_fetch}
+        # Process each future as they complete, with index
         for future in as_completed(futures):
             d = futures[future]
             completed += 1
+            # Show index and date
             try:
                 date, data = future.result()
                 if data:
@@ -231,11 +202,9 @@ def main():
                     log(f"[{completed}/{total}] ❌ {date} – no data")
             except Exception as e:
                 log(f"[{completed}/{total}] ⚠ {d} – error: {e}")
-            # update heartbeat timestamp
-            with heartbeat_lock:
-                last_heartbeat = time.time()
-            # progress log every 10%
-            if completed % max(1, total//10) == 0 or completed == total:
+
+            # Also show percentage every 10 dates
+            if completed % 10 == 0 or completed == total:
                 log(f"⏳ Progress: {completed}/{total} ({100*completed//total}%)")
 
     log(f"✅ Fetched {len(fetched_results)} dates successfully")
