@@ -5,19 +5,24 @@ from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
 
+# Optional: progress bar
+try:
+    from tqdm import tqdm
+    HAS_TQDM = True
+except ImportError:
+    HAS_TQDM = False
+    tqdm = lambda iterable, **kwargs: iterable
+
 BASE_URL = "https://districtdata2026.pages.dev/advance"
 OUTPUT_DIR = "Chain Daily Advance"
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 TARGET_CHAINS = ["PVR", "INOX", "CINEPOLIS"]
+BLOCK_RATES = {"PVR": 0.005, "CINEPOLIS": 0.0325, "INOX": 0.0}
 
-BLOCK_RATES = {
-    "PVR": 0.005,
-    "CINEPOLIS": 0.0325,
-    "INOX": 0.0
-}
+MAX_WORKERS = 80          # high concurrency, adjust if needed
+REQUEST_TIMEOUT = 10
 
-# Lock for thread-safe printing
 print_lock = threading.Lock()
 
 def log(msg):
@@ -44,11 +49,9 @@ def apply_discount(chain, sold, gross, seats):
     return sold, gross
 
 def decompress_show(arr, dicts):
-    """Convert compressed array back to show dict using reverse dicts."""
     reverse = {
         k: {v: kk for kk, v in dicts[k].items()} for k in dicts
     }
-    # order: [cityId, stateId, venueId, chainId, timeId, audiId, total, avail, sold, gross, occBp, minsLeft]
     return {
         "city": reverse["cities"].get(arr[0], "Unknown"),
         "state": reverse["states"].get(arr[1], "Unknown"),
@@ -64,41 +67,32 @@ def decompress_show(arr, dicts):
         "minsLeft": arr[11]
     }
 
-def fetch(date):
+def fetch_date(date, session):
     url = f"{BASE_URL}/{date}_Detailed.json"
     try:
-        r = requests.get(url, timeout=12)
-        if r.status_code == 200:
-            data = r.json()
-            # Check for compressed format
-            if "dicts" in data and "movies" in data:
-                # Decompress all shows per movie
-                decompressed_movies = {}
-                dicts = data["dicts"]
-                for movie, compressed_list in data["movies"].items():
-                    shows = [decompress_show(arr, dicts) for arr in compressed_list]
-                    decompressed_movies[movie] = shows
-                return decompressed_movies
-            else:
-                # Fallback: old format (direct list of shows per movie)
-                return data
-        else:
-            log(f"⚠ No data for {date} (HTTP {r.status_code})")
-    except Exception as e:
-        log(f"⚠ Error fetching {date}: {e}")
-    return None
+        resp = session.get(url, timeout=REQUEST_TIMEOUT)
+        if resp.status_code == 404:
+            return None
+        resp.raise_for_status()
+        data = resp.json()
+        if "dicts" in data and "movies" in data:
+            decompressed = {}
+            dicts = data["dicts"]
+            for movie, compressed_list in data["movies"].items():
+                decompressed[movie] = [decompress_show(arr, dicts) for arr in compressed_list]
+            return decompressed
+        return data
+    except Exception:
+        return None
 
 def process_day(shows):
     raw = defaultdict(lambda: {"sold": 0, "gross": 0, "seats": 0, "shows": 0, "venues": set()})
-
     for s in shows:
         if not isinstance(s, dict):
             continue
-
         chain = detect_chain(s.get("venue", ""))
         if not chain:
             continue
-
         raw[chain]["shows"] += 1
         raw[chain]["sold"] += s.get("sold", 0) or 0
         raw[chain]["gross"] += s.get("gross", 0) or 0
@@ -118,106 +112,128 @@ def process_day(shows):
         }
     return final
 
-def save(path, structure):
-    ist = pytz.timezone("Asia/Kolkata")
-    structure["lastUpdated"] = datetime.now(ist).strftime("%I:%M %p, %d %B %Y")
-
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(structure, f, indent=2, ensure_ascii=False)
-
-    log(f"💾 Saved → {path}")
-
-def process_month(year, month, include_future):
+def save_month_file(year, month, data_dict):
     filename = f"{year}-{month:02d}.json"
     path = os.path.join(OUTPUT_DIR, filename)
+    # Add/update metadata
+    ist = pytz.timezone("Asia/Kolkata")
+    data_dict["lastUpdated"] = datetime.now(ist).strftime("%I:%M %p, %d %B %Y")
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data_dict, f, indent=2, ensure_ascii=False)
+    log(f"💾 Saved → {path}")
 
-    if os.path.exists(path):
-        with open(path, "r", encoding="utf-8") as f:
-            month_json = json.load(f)
-        log(f"🔁 Updating existing {filename}")
-    else:
-        month_json = {}
-        log(f"🆕 Creating month file {filename}")
-
+def main():
     today = datetime.now().date()
-    month_end = (datetime(year, month, 28) + timedelta(days=5)).replace(day=1).date() - timedelta(days=1)
+    start_date = datetime(2025, 8, 1).date()
+    end_date = today + timedelta(days=5)   # future buffer
 
-    if include_future:
-        end_date = min(month_end, today + timedelta(days=5))
-    else:
-        end_date = month_end
-
-    current = datetime(year, month, 1).date()
-
-    # Build list of dates to fetch
-    dates_to_fetch = []
+    # Build list of all dates from start_date to end_date
+    all_dates = []
+    current = start_date
     while current <= end_date:
-        if current.month != month:
-            break
-        d = current.strftime("%Y-%m-%d")
-
-        # Skip logic
-        if d in month_json and not include_future:
-            current += timedelta(days=1)
-            continue
-        if d in month_json and current < today and include_future:
-            current += timedelta(days=1)
-            continue
-
-        dates_to_fetch.append(d)
+        all_dates.append(current.strftime("%Y-%m-%d"))
         current += timedelta(days=1)
 
+    log(f"📅 Total dates to check: {len(all_dates)}")
+
+    # Load existing month files to know which dates are already processed
+    existing_data = {}
+    for y in range(start_date.year, end_date.year + 1):
+        for m in range(1, 13):
+            fname = f"{y}-{m:02d}.json"
+            path = os.path.join(OUTPUT_DIR, fname)
+            if os.path.exists(path):
+                with open(path, "r", encoding="utf-8") as f:
+                    existing_data[fname] = json.load(f)
+
+    # Determine which dates need fetching (not in any month file)
+    dates_to_fetch = []
+    for d in all_dates:
+        year, month, day = d.split('-')
+        fname = f"{year}-{month}.json"
+        if fname in existing_data and d in existing_data[fname]:
+            # already have data for that movie? actually we need to check if any movie exists
+            # For simplicity, if date exists as a key in the month file (even empty), skip.
+            # But month file stores movie->date->chain stats, so date could be a sub-key.
+            # We'll check if any movie has that date.
+            has_date = False
+            for movie, dates_dict in existing_data[fname].items():
+                if movie in ("lastUpdated",):
+                    continue
+                if d in dates_dict:
+                    has_date = True
+                    break
+            if has_date:
+                continue
+        dates_to_fetch.append(d)
+
+    log(f"🆕 Dates to fetch: {len(dates_to_fetch)}")
+
     if not dates_to_fetch:
-        log(f"✅ No new dates to fetch for {filename}")
+        log("✅ All dates already processed.")
         return
 
-    log(f"🚀 Fetching {len(dates_to_fetch)} dates in parallel (max 50 threads)")
-
     # Parallel fetch
-    results = {}
-    with ThreadPoolExecutor(max_workers=50) as executor:
-        future_to_date = {executor.submit(fetch, d): d for d in dates_to_fetch}
-        for future in as_completed(future_to_date):
-            d = future_to_date[future]
-            try:
-                data = future.result()
-                if data:
-                    results[d] = data
-                    log(f"✅ {d} fetched")
-                else:
-                    log(f"❌ {d} – no data")
-            except Exception as e:
-                log(f"❌ {d} – error: {e}")
+    fetched_results = {}
+    log(f"🚀 Fetching {len(dates_to_fetch)} dates with {MAX_WORKERS} workers...")
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+        # Prepare sessions per thread
+        def fetch_wrapper(date):
+            with requests.Session() as session:
+                return date, fetch_date(date, session)
 
-    # Merge results into month_json
-    for d, data in results.items():
+        futures = {executor.submit(fetch_wrapper, d): d for d in dates_to_fetch}
+        # Use tqdm for progress if available
+        iterator = tqdm(as_completed(futures), total=len(futures), desc="Fetching") if HAS_TQDM else as_completed(futures)
+        for future in iterator:
+            d = futures[future]
+            try:
+                date, data = future.result()
+                if data:
+                    fetched_results[date] = data
+            except Exception:
+                pass
+
+    log(f"✅ Fetched {len(fetched_results)} dates successfully")
+
+    # Group results by month
+    month_buckets = defaultdict(dict)  # fname -> {movie: {date: chain_stats}}
+    for date_str, data in fetched_results.items():
+        year, month, _ = date_str.split('-')
+        fname = f"{year}-{month}.json"
+        # Merge data into this month's bucket
         for movie, shows in data.items():
             if not isinstance(shows, list):
                 continue
             stats = process_day(shows)
             if stats:
-                month_json.setdefault(movie, {})[d] = {
+                # stats is dict chain -> {shows, sold, venues, gross, occ}
+                # store as chain -> [shows, sold, venues, gross, occ]
+                month_buckets[fname].setdefault(movie, {})[date_str] = {
                     c: [v["shows"], v["sold"], v["venues"], v["gross"], v["occ"]]
                     for c, v in stats.items()
                 }
-                log(f"✔ Updated {movie} → {d}")
 
-    save(path, month_json)
+    # Merge into existing month files and save
+    for fname, new_data in month_buckets.items():
+        # Load existing if any
+        path = os.path.join(OUTPUT_DIR, fname)
+        if os.path.exists(path):
+            with open(path, "r", encoding="utf-8") as f:
+                month_data = json.load(f)
+        else:
+            month_data = {}
+        # Merge new_data into month_data
+        for movie, dates_dict in new_data.items():
+            if movie not in month_data:
+                month_data[movie] = {}
+            for date_str, chain_stats in dates_dict.items():
+                # chain_stats already has chains -> [shows,sold,venues,gross,occ]
+                month_data[movie][date_str] = chain_stats
+        # Save
+        save_month_file(int(fname[:4]), int(fname[5:7]), month_data)
 
-def main():
-    today = datetime.now()
-
-    # Process past months normally
-    for y in range(2025, today.year + 1):
-        for m in range(1, today.month):
-            process_month(y, m, include_future=False)
-
-    # Process current month with future buffer
-    process_month(today.year, today.month, include_future=True)
-
-    # Prepare next month WITHOUT buffer (it will get buffer later when it's current)
-    next_month = today.replace(day=28) + timedelta(days=5)
-    process_month(next_month.year, next_month.month, include_future=False)
+    # Also handle months that had zero new data? no need.
 
 if __name__ == "__main__":
     main()
