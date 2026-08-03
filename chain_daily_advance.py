@@ -159,7 +159,7 @@ def main():
     global start_time
     start_time = time.time()
     today = datetime.now().date()
-    start_date = datetime(2025, 8, 1).date()
+    start_date = datetime(2025, 9, 1).date()
     end_date = today + timedelta(days=5)
 
     all_dates = []
