@@ -100,19 +100,19 @@ def normalize_movie_key(raw_key):
 
 def detect_chain(show):
     """
-    Prefer the chain value decoded from the compressed source.
-    Fall back to venue name.
+    Match chain ONLY from the venue name.
+
+    Case-insensitive:
+        PVR / pvr / Pvr
+        INOX / inox / Inox
+        Cinepolis / CINEPOLIS / cinepolis
+        etc.
+
+    The compressed JSON "chain" field is intentionally ignored.
     """
 
-    chain_value = str(
-        show.get("chain", "")
-    ).strip().lower()
-
-    if chain_value:
-
-        for chain in CHAIN_LIST:
-            if chain.lower() in chain_value:
-                return chain
+    if not isinstance(show, dict):
+        return None
 
     venue = str(
         show.get("venue", "")
@@ -121,10 +121,10 @@ def detect_chain(show):
     if not venue:
         return None
 
-    venue_lower = venue.lower()
+    venue_upper = venue.upper()
 
     for chain in CHAIN_LIST:
-        if chain.lower() in venue_lower:
+        if chain.upper() in venue_upper:
             return chain
 
     return None
