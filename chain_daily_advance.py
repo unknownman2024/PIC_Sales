@@ -3,6 +3,7 @@ import json, os, requests, pytz, re
 from datetime import datetime, timedelta
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import time
 
 BASE_URL = "https://districtdata2026.pages.dev/advance"
 OUTPUT_DIR = "Chain Daily Advance"
@@ -10,23 +11,23 @@ os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 CHAIN_ORDER = ["PVR", "INOX", "CINEPOLIS"]
 BLOCK_RATES = {"PVR": 0.005, "CINEPOLIS": 0.0325, "INOX": 0.0}
-MAX_WORKERS = 80
-REQUEST_TIMEOUT = 15
 
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-}
+MAX_WORKERS = 80
+REQUEST_TIMEOUT = 10
 
 def log(msg):
     print("➡", msg)
 
-def normalize_movie_name(name):
-    """Remove trailing bracketed format/language info, e.g. ' [3D | Hindi]'"""
-    name = name.strip()
-    # Remove one or more bracketed sections at the end
-    pattern = r'\s*\[[^\]]*\]$'
-    cleaned = re.sub(pattern, '', name)
-    return cleaned.strip()
+def simplify_movie_key(raw_key):
+    """Convert 'Movie [Format | Language]' → 'Movie | Language'"""
+    match = re.match(r'^(.+?)\s*\[([^\]]+)\]\s*$', raw_key)
+    if match:
+        full_name = match.group(1).strip()
+        inside = match.group(2).strip()
+        parts = [p.strip() for p in inside.split('|')]
+        lang = parts[-1]  # last part is language
+        return f"{full_name} | {lang}"
+    return raw_key
 
 def detect_chain(venue):
     if not venue:
@@ -69,7 +70,7 @@ def decompress_show(arr, dicts):
 def fetch_date(date, session):
     url = f"{BASE_URL}/{date}_Detailed.json"
     try:
-        resp = session.get(url, timeout=REQUEST_TIMEOUT, headers=HEADERS)
+        resp = session.get(url, timeout=REQUEST_TIMEOUT)
         if resp.status_code == 404:
             return None
         resp.raise_for_status()
@@ -78,12 +79,10 @@ def fetch_date(date, session):
             decompressed = {}
             dicts = data["dicts"]
             for movie, compressed_list in data["movies"].items():
-                norm_movie = normalize_movie_name(movie)
-                decompressed[norm_movie] = [decompress_show(arr, dicts) for arr in compressed_list]
+                decompressed[movie] = [decompress_show(arr, dicts) for arr in compressed_list]
             return decompressed
         return data
-    except Exception as e:
-        log(f"⚠️ Error fetching {date}: {e}")
+    except Exception:
         return None
 
 def process_day(shows):
@@ -108,13 +107,8 @@ def process_day(shows):
         else:
             sold, gross = apply_discount(chain, v["sold"], v["gross"], v["seats"])
             occ = round((sold / v["seats"]) * 100, 2) if v["seats"] else 0
-            result.append([
-                v["shows"],
-                sold,
-                len(v["venues"]),
-                round(gross, 2),
-                occ
-            ])
+            # Store shows, sold, venues_count, gross, occ, seats
+            result.append([v["shows"], sold, len(v["venues"]), round(gross, 2), occ, v["seats"]])
     return result
 
 def save_month_file(year, month, data_dict):
@@ -132,29 +126,76 @@ def load_existing_month(fname):
         return {}
     with open(path, "r", encoding="utf-8") as f:
         data = json.load(f)
-    # Normalize movie names and merge if collisions
-    normalized = {}
+
+    # Convert all movie keys to simplified format and merge collisions
+    merged = {}
     for movie, dates in data.items():
         if movie == "lastUpdated":
-            normalized["lastUpdated"] = dates
+            merged["lastUpdated"] = dates
             continue
-        norm_movie = normalize_movie_name(movie)
-        if norm_movie not in normalized:
-            normalized[norm_movie] = {}
-        # Merge date entries (if duplicate, keep existing; assume no conflict)
+        simple = simplify_movie_key(movie)
+        if simple not in merged:
+            merged[simple] = {}
+        # Merge date entries
         for date_str, chain_data in dates.items():
-            # Convert old dict format to array if needed
+            # Convert old dict format to list if needed
             if isinstance(chain_data, dict):
                 new_entry = []
                 for chain in CHAIN_ORDER:
                     if chain in chain_data:
                         v = chain_data[chain]
-                        new_entry.append(v)
+                        # v might be a dict with keys like 'shows', 'sold'? 
+                        # In old format we stored list of [shows, sold, venues, gross, occ]
+                        # But we also may have stored as dict. We'll handle both.
+                        if isinstance(v, dict):
+                            # try to convert to list
+                            new_entry.append([
+                                v.get("shows", 0),
+                                v.get("sold", 0),
+                                v.get("venues", 0),
+                                v.get("gross", 0.0),
+                                v.get("occ", 0.0),
+                                v.get("seats", 0)
+                            ])
+                        elif isinstance(v, list):
+                            new_entry.append(v)
+                        else:
+                            new_entry.append(None)
                     else:
                         new_entry.append(None)
                 chain_data = new_entry
-            normalized[norm_movie][date_str] = chain_data
-    return normalized
+            # Now chain_data is a list of 6 elements per chain (or None)
+            if date_str not in merged[simple]:
+                merged[simple][date_str] = chain_data
+            else:
+                # Merge: sum numeric fields (shows, sold, venues, gross, seats) and recompute occ
+                existing = merged[simple][date_str]
+                new_list = []
+                for i, chain in enumerate(CHAIN_ORDER):
+                    old = existing[i] if i < len(existing) else None
+                    new = chain_data[i] if i < len(chain_data) else None
+                    if old is None and new is None:
+                        new_list.append(None)
+                    elif old is None:
+                        new_list.append(new)
+                    elif new is None:
+                        new_list.append(old)
+                    else:
+                        # Both are lists of 6 (or 5)
+                        # Ensure length 6, pad if needed
+                        if len(old) < 6:
+                            old = old + [0] * (6 - len(old))
+                        if len(new) < 6:
+                            new = new + [0] * (6 - len(new))
+                        shows = old[0] + new[0]
+                        sold = old[1] + new[1]
+                        venues = old[2] + new[2]   # sum (overcounts but simplest)
+                        gross = old[3] + new[3]
+                        seats = old[5] + new[5]
+                        occ = round((sold / seats) * 100, 2) if seats else 0
+                        new_list.append([shows, sold, venues, round(gross, 2), occ, seats])
+                merged[simple][date_str] = new_list
+    return merged
 
 def main():
     today = datetime.now().date()
@@ -234,9 +275,11 @@ def main():
         for movie, shows in data.items():
             if not isinstance(shows, list):
                 continue
+            # Simplify movie key before storing
+            simple_movie = simplify_movie_key(movie)
             stats = process_day(shows)
             if stats and any(stats):
-                month_buckets[fname].setdefault(movie, {})[date_str] = stats
+                month_buckets[fname].setdefault(simple_movie, {})[date_str] = stats
 
     # Merge and save
     for fname, new_data in month_buckets.items():
@@ -246,6 +289,7 @@ def main():
             if movie not in month_data:
                 month_data[movie] = {}
             for date_str, chain_stats in dates_dict.items():
+                # If date already exists, merge (sum) – but we already merged on load, so just assign
                 month_data[movie][date_str] = chain_stats
         if last_updated:
             month_data["lastUpdated"] = last_updated
