@@ -235,27 +235,42 @@ def fetch_date(date, session):
     try:
         resp = session.get(
             url,
-            timeout=REQUEST_TIMEOUT
+            timeout=30,
+            headers={
+                "User-Agent": "Mozilla/5.0",
+                "Accept": "application/json",
+            },
         )
 
+        # ----------------------------------------------------
+        # IMPORTANT:
+        # Show the actual HTTP status
+        # ----------------------------------------------------
+
         if resp.status_code == 404:
+            log(f"⚪ {date} – source file does not exist")
             return None
 
-        resp.raise_for_status()
+        if resp.status_code != 200:
+            log(
+                f"⚠️ {date} – HTTP {resp.status_code}"
+            )
+            return None
 
-        data = resp.json()
+        # ----------------------------------------------------
+        # Parse JSON separately so JSON errors are visible
+        # ----------------------------------------------------
+
+        try:
+            data = resp.json()
+        except Exception as e:
+            log(
+                f"❌ {date} – JSON decode error: {e}"
+            )
+            return None
 
         # ====================================================
         # NEW COMPRESSED FORMAT
-        #
-        # {
-        #   "date": "...",
-        #   "lastUpdated": "...",
-        #   "dicts": {...},
-        #   "movies": {
-        #       "Movie | Hindi": [[...], [...]]
-        #   }
-        # }
         # ====================================================
 
         if (
@@ -273,35 +288,44 @@ def fetch_date(date, session):
                 if not isinstance(compressed_list, list):
                     continue
 
-                # --------------------------------------------
-                # Normalize BOTH movie formats
-                # --------------------------------------------
-
-                movie_key = normalize_movie_key(raw_movie_key)
-
-                # --------------------------------------------
-                # Decompress each show
-                # --------------------------------------------
+                movie_key = normalize_movie_key(
+                    raw_movie_key
+                )
 
                 for arr in compressed_list:
+
                     if not isinstance(arr, list):
                         continue
 
                     try:
-                        show = decompress_show(arr, dicts)
-                        decompressed[movie_key].append(show)
-                    except Exception:
-                        continue
+                        show = decompress_show(
+                            arr,
+                            dicts
+                        )
+
+                        decompressed[movie_key].append(
+                            show
+                        )
+
+                    except Exception as e:
+                        log(
+                            f"⚠️ {date} – bad show "
+                            f"under {movie_key}: {e}"
+                        )
+
+            log(
+                f"✅ {date} – parsed "
+                f"{len(decompressed)} movies"
+            )
 
             return dict(decompressed)
 
         # ====================================================
-        # FALLBACK
-        #
-        # Keep compatibility with an older/uncompressed file.
+        # FALLBACK OLD FORMAT
         # ====================================================
 
         if isinstance(data, dict):
+
             normalized = {}
 
             for raw_movie_key, shows in data.items():
@@ -312,18 +336,44 @@ def fetch_date(date, session):
                 if not isinstance(shows, list):
                     continue
 
-                movie_key = normalize_movie_key(raw_movie_key)
+                movie_key = normalize_movie_key(
+                    raw_movie_key
+                )
 
-                if movie_key not in normalized:
-                    normalized[movie_key] = []
+                normalized.setdefault(
+                    movie_key,
+                    []
+                ).extend(shows)
 
-                normalized[movie_key].extend(shows)
+            log(
+                f"✅ {date} – parsed legacy format"
+            )
 
             return normalized
 
+        log(
+            f"⚠️ {date} – unknown JSON structure"
+        )
+
         return None
 
-    except Exception:
+    except requests.exceptions.Timeout:
+        log(
+            f"⏱️ {date} – request timeout"
+        )
+        return None
+
+    except requests.exceptions.RequestException as e:
+        log(
+            f"🌐 {date} – request error: {e}"
+        )
+        return None
+
+    except Exception as e:
+        log(
+            f"❌ {date} – unexpected error: "
+            f"{type(e).__name__}: {e}"
+        )
         return None
 
 
