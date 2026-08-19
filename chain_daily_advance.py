@@ -67,18 +67,33 @@ def normalize_movie_key(raw_key):
 # ============================================================
 
 def detect_chain(show):
-    chain_value = str(show.get("chain", "")).strip().upper()
-    if "PVR" in chain_value:
-        return "PVR"
-    if "INOX" in chain_value:
-        return "INOX"
-    if "CINEPOLIS" in chain_value:
-        return "CINEPOLIS"
+    """
+    Determine chain ONLY from the venue name.
 
-    venue = str(show.get("venue", "")).strip().upper()
+    Do NOT use the compressed JSON "chain" field.
+
+    Matching behavior is the same as the old PIC:
+        venue.upper()
+        → check whether chain keyword exists in venue
+        → first matching chain wins
+    """
+
+    if not isinstance(show, dict):
+        return None
+
+    venue = str(
+        show.get("venue", "")
+    ).strip()
+
+    if not venue:
+        return None
+
+    venue_upper = venue.upper()
+
     for chain in CHAIN_ORDER:
-        if chain in venue:
+        if chain.upper() in venue_upper:
             return chain
+
     return None
 
 # ============================================================
