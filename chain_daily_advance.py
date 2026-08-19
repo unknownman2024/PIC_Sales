@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
-import json, os, requests, pytz
+import json, os, requests, pytz, re
 from datetime import datetime, timedelta
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
-import time
 
 BASE_URL = "https://districtdata2026.pages.dev/advance"
 OUTPUT_DIR = "Chain Daily Advance"
@@ -11,12 +10,23 @@ os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 CHAIN_ORDER = ["PVR", "INOX", "CINEPOLIS"]
 BLOCK_RATES = {"PVR": 0.005, "CINEPOLIS": 0.0325, "INOX": 0.0}
-
 MAX_WORKERS = 80
-REQUEST_TIMEOUT = 10
+REQUEST_TIMEOUT = 15
+
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+}
 
 def log(msg):
     print("➡", msg)
+
+def normalize_movie_name(name):
+    """Remove trailing bracketed format/language info, e.g. ' [3D | Hindi]'"""
+    name = name.strip()
+    # Remove one or more bracketed sections at the end
+    pattern = r'\s*\[[^\]]*\]$'
+    cleaned = re.sub(pattern, '', name)
+    return cleaned.strip()
 
 def detect_chain(venue):
     if not venue:
@@ -59,7 +69,7 @@ def decompress_show(arr, dicts):
 def fetch_date(date, session):
     url = f"{BASE_URL}/{date}_Detailed.json"
     try:
-        resp = session.get(url, timeout=REQUEST_TIMEOUT)
+        resp = session.get(url, timeout=REQUEST_TIMEOUT, headers=HEADERS)
         if resp.status_code == 404:
             return None
         resp.raise_for_status()
@@ -68,10 +78,12 @@ def fetch_date(date, session):
             decompressed = {}
             dicts = data["dicts"]
             for movie, compressed_list in data["movies"].items():
-                decompressed[movie] = [decompress_show(arr, dicts) for arr in compressed_list]
+                norm_movie = normalize_movie_name(movie)
+                decompressed[norm_movie] = [decompress_show(arr, dicts) for arr in compressed_list]
             return decompressed
         return data
-    except Exception:
+    except Exception as e:
+        log(f"⚠️ Error fetching {date}: {e}")
         return None
 
 def process_day(shows):
@@ -120,11 +132,18 @@ def load_existing_month(fname):
         return {}
     with open(path, "r", encoding="utf-8") as f:
         data = json.load(f)
-    # Convert old dict format to array format for consistency
+    # Normalize movie names and merge if collisions
+    normalized = {}
     for movie, dates in data.items():
         if movie == "lastUpdated":
+            normalized["lastUpdated"] = dates
             continue
+        norm_movie = normalize_movie_name(movie)
+        if norm_movie not in normalized:
+            normalized[norm_movie] = {}
+        # Merge date entries (if duplicate, keep existing; assume no conflict)
         for date_str, chain_data in dates.items():
+            # Convert old dict format to array if needed
             if isinstance(chain_data, dict):
                 new_entry = []
                 for chain in CHAIN_ORDER:
@@ -133,8 +152,9 @@ def load_existing_month(fname):
                         new_entry.append(v)
                     else:
                         new_entry.append(None)
-                data[movie][date_str] = new_entry
-    return data
+                chain_data = new_entry
+            normalized[norm_movie][date_str] = chain_data
+    return normalized
 
 def main():
     today = datetime.now().date()
