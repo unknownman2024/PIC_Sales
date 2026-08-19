@@ -120,7 +120,7 @@ def load_existing_month(fname):
         return {}
     with open(path, "r", encoding="utf-8") as f:
         data = json.load(f)
-    # Convert old dict format to array format
+    # Convert old dict format to array format for consistency
     for movie, dates in data.items():
         if movie == "lastUpdated":
             continue
@@ -188,11 +188,9 @@ def main():
     completed = 0
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
         futures = {executor.submit(fetch_wrapper, d): d for d in dates_to_fetch}
-        # Process each future as they complete, with index
         for future in as_completed(futures):
             d = futures[future]
             completed += 1
-            # Show index and date
             try:
                 date, data = future.result()
                 if data:
@@ -203,7 +201,6 @@ def main():
             except Exception as e:
                 log(f"[{completed}/{total}] ⚠ {d} – error: {e}")
 
-            # Also show percentage every 10 dates
             if completed % 10 == 0 or completed == total:
                 log(f"⏳ Progress: {completed}/{total} ({100*completed//total}%)")
 
