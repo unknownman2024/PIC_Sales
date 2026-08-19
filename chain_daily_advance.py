@@ -4,11 +4,11 @@ import json
 import os
 import requests
 import pytz
-
+import time
+import calendar
 from datetime import datetime, timedelta
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
-
 
 # ============================================================
 # CONFIG
@@ -31,14 +31,8 @@ MAX_WORKERS = 15
 REQUEST_TIMEOUT = 30
 RETRIES = 3
 
-# Older months are retained, but every run REBUILDS:
-#   - previous month
-#   - current month
-#
-# If these months already exist locally, they are ignored
-# during the rebuild and regenerated from source.
-# ============================================================
-
+# Backfill start date (inclusive)
+BACKFILL_START = datetime(2025, 8, 1).date()
 
 # ============================================================
 # LOG
@@ -47,366 +41,157 @@ RETRIES = 3
 def log(msg):
     print(f"➡ {msg}", flush=True)
 
-
 # ============================================================
 # MOVIE KEY NORMALIZATION
 # ============================================================
 
 def normalize_movie_key(raw_key):
-    """
-    Supports:
-
-        Movie [2D | Hindi]
-        Movie [IMAX | Hindi]
-        Movie | Hindi
-
-    All become:
-
-        Movie | Hindi
-    """
-
     if not isinstance(raw_key, str):
         return raw_key
 
     key = raw_key.strip()
-
     if key.endswith("]"):
-
         open_bracket = key.rfind("[")
-
         if open_bracket != -1:
-
             movie_name = key[:open_bracket].strip()
             inside = key[open_bracket + 1:-1].strip()
-
             if movie_name and inside:
-
-                parts = [
-                    p.strip()
-                    for p in inside.split("|")
-                    if p.strip()
-                ]
-
+                parts = [p.strip() for p in inside.split("|") if p.strip()]
                 if parts:
                     language = parts[-1]
                     return f"{movie_name} | {language}"
-
     return key
-
 
 # ============================================================
 # CHAIN DETECTION
 # ============================================================
 
 def detect_chain(show):
-
-    chain_value = str(
-        show.get("chain", "")
-    ).strip().upper()
-
+    chain_value = str(show.get("chain", "")).strip().upper()
     if "PVR" in chain_value:
         return "PVR"
-
     if "INOX" in chain_value:
         return "INOX"
-
     if "CINEPOLIS" in chain_value:
         return "CINEPOLIS"
 
-    venue = str(
-        show.get("venue", "")
-    ).strip().upper()
-
+    venue = str(show.get("venue", "")).strip().upper()
     for chain in CHAIN_ORDER:
         if chain in venue:
             return chain
-
     return None
-
 
 # ============================================================
 # DISCOUNT
 # ============================================================
 
 def apply_discount(chain, sold, gross, seats):
-
     rate = BLOCK_RATES.get(chain, 0)
-
     if sold > 0 and rate > 0:
-
-        avg_price = (
-            gross / sold
-            if sold
-            else 0
-        )
-
+        avg_price = gross / sold if sold else 0
         blocked = seats * rate
-
-        sold = max(
-            0,
-            round(sold - blocked)
-        )
-
-        gross = max(
-            0,
-            sold * avg_price
-        )
-
+        sold = max(0, round(sold - blocked))
+        gross = max(0, sold * avg_price)
     return sold, gross
-
 
 # ============================================================
 # BUILD REVERSE DICTS
 # ============================================================
 
 def build_reverse_dicts(dicts):
-
     reverse = {}
-
-    for name in (
-        "cities",
-        "states",
-        "venues",
-        "chains",
-        "showtimes",
-        "audis",
-    ):
-
-        source = dicts.get(
-            name,
-            {}
-        )
-
-        reverse[name] = {
-            value: key
-            for key, value in source.items()
-        }
-
+    for name in ("cities", "states", "venues", "chains", "showtimes", "audis"):
+        source = dicts.get(name, {})
+        reverse[name] = {value: key for key, value in source.items()}
     return reverse
-
 
 # ============================================================
 # DECOMPRESS ONE SHOW
 # ============================================================
 
 def decompress_show(arr, reverse):
-
-    if not isinstance(arr, list):
-        return None
-
-    if len(arr) < 12:
+    if not isinstance(arr, list) or len(arr) < 12:
         return None
 
     def resolve(name, index, default=""):
-
-        return reverse[name].get(
-            arr[index],
-            default
-        )
+        return reverse[name].get(arr[index], default)
 
     total_seats = arr[6] or 0
     available = arr[7] or 0
     sold = arr[8] or 0
-
     gross_x100 = arr[9] or 0
     occupancy_x100 = arr[10] or 0
 
     return {
-        "city": resolve(
-            "cities",
-            0,
-            "Unknown"
-        ),
-
-        "state": resolve(
-            "states",
-            1,
-            "Unknown"
-        ),
-
-        "venue": resolve(
-            "venues",
-            2,
-            "Unknown"
-        ),
-
-        "chain": resolve(
-            "chains",
-            3,
-            "Unknown"
-        ),
-
-        "time": resolve(
-            "showtimes",
-            4,
-            ""
-        ),
-
-        "audi": resolve(
-            "audis",
-            5,
-            ""
-        ),
-
+        "city": resolve("cities", 0, "Unknown"),
+        "state": resolve("states", 1, "Unknown"),
+        "venue": resolve("venues", 2, "Unknown"),
+        "chain": resolve("chains", 3, "Unknown"),
+        "time": resolve("showtimes", 4, ""),
+        "audi": resolve("audis", 5, ""),
         "totalSeats": total_seats,
         "available": available,
         "sold": sold,
-
-        # Source stores gross × 100
         "gross": gross_x100 / 100.0,
-
-        # Source stores occupancy × 100
-        "occupancy": (
-            f"{occupancy_x100 / 100:.2f}%"
-        ),
-
+        "occupancy": f"{occupancy_x100 / 100:.2f}%",
         "minsLeft": arr[11] or 0,
     }
-
 
 # ============================================================
 # FETCH ONE DATE
 # ============================================================
 
 def fetch_date(date_str, session):
-
-    url = (
-        f"{BASE_URL}/"
-        f"{date_str}_Detailed.json"
-    )
-
+    url = f"{BASE_URL}/{date_str}_Detailed.json"
     last_error = None
 
-    for attempt in range(
-        1,
-        RETRIES + 1
-    ):
-
+    for attempt in range(1, RETRIES + 1):
         try:
-
             response = session.get(
                 url,
                 timeout=REQUEST_TIMEOUT,
                 headers={
-                    "User-Agent": (
-                        "Mozilla/5.0 "
-                        "(Windows NT 10.0; Win64; x64) "
-                        "AppleWebKit/537.36 "
-                        "(KHTML, like Gecko) "
-                        "Chrome/151 Safari/537.36"
-                    ),
-                    "Accept": (
-                        "application/json,text/plain,*/*"
-                    ),
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151 Safari/537.36",
+                    "Accept": "application/json,text/plain,*/*",
                 },
             )
 
-            # ------------------------------------------------
-            # SOURCE FILE DOES NOT EXIST
-            # ------------------------------------------------
-
             if response.status_code == 404:
+                return {"status": "missing", "data": None}
 
-                return {
-                    "status": "missing",
-                    "data": None,
-                }
-
-            # ------------------------------------------------
-            # RETRY TEMPORARY ERRORS
-            # ------------------------------------------------
-
-            if response.status_code in {
-                429,
-                500,
-                502,
-                503,
-                504,
-            }:
-
-                last_error = (
-                    f"HTTP {response.status_code}"
-                )
-
+            if response.status_code in {429, 500, 502, 503, 504}:
+                last_error = f"HTTP {response.status_code}"
                 if attempt < RETRIES:
                     time.sleep(attempt)
                     continue
-
-                return {
-                    "status": "error",
-                    "data": None,
-                    "error": last_error,
-                }
+                return {"status": "error", "data": None, "error": last_error}
 
             response.raise_for_status()
 
-            # ------------------------------------------------
-            # JSON
-            # ------------------------------------------------
-
             try:
                 data = response.json()
-
             except Exception as exc:
+                return {"status": "error", "data": None, "error": f"JSON decode error: {exc}"}
 
-                return {
-                    "status": "error",
-                    "data": None,
-                    "error": (
-                        f"JSON decode error: {exc}"
-                    ),
-                }
-
-            # =================================================
-            # NEW COMPRESSED FORMAT
-            # =================================================
-
+            # New compressed format
             if (
                 isinstance(data, dict)
-                and isinstance(
-                    data.get("dicts"),
-                    dict
-                )
-                and isinstance(
-                    data.get("movies"),
-                    dict
-                )
+                and isinstance(data.get("dicts"), dict)
+                and isinstance(data.get("movies"), dict)
             ):
-
                 dicts = data["dicts"]
                 movies = data["movies"]
-
-                reverse = build_reverse_dicts(
-                    dicts
-                )
-
+                reverse = build_reverse_dicts(dicts)
                 decompressed = defaultdict(list)
 
-                for raw_movie_key, compressed_list in (
-                    movies.items()
-                ):
-
-                    if not isinstance(
-                        compressed_list,
-                        list
-                    ):
+                for raw_movie_key, compressed_list in movies.items():
+                    if not isinstance(compressed_list, list):
                         continue
-
-                    movie_key = normalize_movie_key(
-                        raw_movie_key
-                    )
-
+                    movie_key = normalize_movie_key(raw_movie_key)
                     for arr in compressed_list:
-
-                        show = decompress_show(
-                            arr,
-                            reverse
-                        )
-
+                        show = decompress_show(arr, reverse)
                         if show is not None:
-                            decompressed[
-                                movie_key
-                            ].append(show)
+                            decompressed[movie_key].append(show)
 
                 return {
                     "status": "success",
@@ -415,37 +200,16 @@ def fetch_date(date_str, session):
                     "parsed_movies": len(decompressed),
                 }
 
-            # =================================================
-            # LEGACY FALLBACK
-            # =================================================
-
+            # Legacy fallback
             if isinstance(data, dict):
-
                 normalized = defaultdict(list)
-
                 for raw_movie_key, shows in data.items():
-
-                    if raw_movie_key in {
-                        "date",
-                        "lastUpdated",
-                        "dicts",
-                        "movies",
-                    }:
+                    if raw_movie_key in {"date", "lastUpdated", "dicts", "movies"}:
                         continue
-
-                    if not isinstance(
-                        shows,
-                        list
-                    ):
+                    if not isinstance(shows, list):
                         continue
-
-                    movie_key = normalize_movie_key(
-                        raw_movie_key
-                    )
-
-                    normalized[
-                        movie_key
-                    ].extend(shows)
+                    movie_key = normalize_movie_key(raw_movie_key)
+                    normalized[movie_key].extend(shows)
 
                 return {
                     "status": "success",
@@ -454,692 +218,262 @@ def fetch_date(date_str, session):
                     "parsed_movies": len(normalized),
                 }
 
-            return {
-                "status": "error",
-                "data": None,
-                "error": "Unknown JSON structure",
-            }
+            return {"status": "error", "data": None, "error": "Unknown JSON structure"}
 
         except requests.exceptions.Timeout as exc:
-
-            last_error = (
-                f"timeout on attempt "
-                f"{attempt}/{RETRIES}"
-            )
-
+            last_error = f"timeout on attempt {attempt}/{RETRIES}"
             if attempt == RETRIES:
-
-                return {
-                    "status": "error",
-                    "data": None,
-                    "error": last_error,
-                }
+                return {"status": "error", "data": None, "error": last_error}
 
         except requests.exceptions.RequestException as exc:
-
             last_error = str(exc)
-
             if attempt == RETRIES:
-
-                return {
-                    "status": "error",
-                    "data": None,
-                    "error": last_error,
-                }
+                return {"status": "error", "data": None, "error": last_error}
 
         except Exception as exc:
+            return {"status": "error", "data": None, "error": f"{type(exc).__name__}: {exc}"}
 
-            return {
-                "status": "error",
-                "data": None,
-                "error": (
-                    f"{type(exc).__name__}: {exc}"
-                ),
-            }
-
-    return {
-        "status": "error",
-        "data": None,
-        "error": last_error or "Unknown error",
-    }
-
+    return {"status": "error", "data": None, "error": last_error or "Unknown error"}
 
 # ============================================================
 # PROCESS DAY
 # ============================================================
 
 def process_day(shows):
-
-    raw = defaultdict(
-        lambda: {
-            "sold": 0,
-            "gross": 0,
-            "seats": 0,
-            "shows": 0,
-            "venues": set(),
-        }
-    )
+    raw = defaultdict(lambda: {"sold": 0, "gross": 0, "seats": 0, "shows": 0, "venues": set()})
 
     for show in shows:
-
         if not isinstance(show, dict):
             continue
-
         chain = detect_chain(show)
-
         if not chain:
             continue
 
         raw[chain]["shows"] += 1
+        raw[chain]["sold"] += show.get("sold", 0) or 0
+        raw[chain]["gross"] += show.get("gross", 0) or 0
+        raw[chain]["seats"] += show.get("totalSeats", 0) or 0
 
-        raw[chain]["sold"] += (
-            show.get("sold", 0) or 0
-        )
-
-        raw[chain]["gross"] += (
-            show.get("gross", 0) or 0
-        )
-
-        raw[chain]["seats"] += (
-            show.get("totalSeats", 0) or 0
-        )
-
-        venue = str(
-            show.get("venue", "")
-        ).strip()
-
+        venue = str(show.get("venue", "")).strip()
         if venue:
-            raw[chain][
-                "venues"
-            ].add(venue)
+            raw[chain]["venues"].add(venue)
 
     result = []
-
     for chain in CHAIN_ORDER:
-
         value = raw.get(chain)
-
-        if (
-            not value
-            or value["seats"] == 0
-        ):
-
+        if not value or value["seats"] == 0:
             result.append(None)
             continue
 
-        sold, gross = apply_discount(
-            chain,
-            value["sold"],
-            value["gross"],
-            value["seats"],
-        )
-
-        occupancy = round(
-            (
-                sold /
-                value["seats"]
-            ) * 100,
-            2,
-        )
-
-        result.append(
-            [
-                value["shows"],
-                sold,
-                len(value["venues"]),
-                round(gross, 2),
-                occupancy,
-            ]
-        )
+        sold, gross = apply_discount(chain, value["sold"], value["gross"], value["seats"])
+        occupancy = round((sold / value["seats"]) * 100, 2)
+        result.append([value["shows"], sold, len(value["venues"]), round(gross, 2), occupancy])
 
     return result
-
 
 # ============================================================
 # MONTH HELPERS
 # ============================================================
 
-def month_start(year, month):
+def last_day_of_month(year, month):
+    _, last = calendar.monthrange(year, month)
+    return datetime(year, month, last).date()
 
-    return datetime(
-        year,
-        month,
-        1
-    ).date()
+def month_range(year, month):
+    start = datetime(year, month, 1).date()
+    end = last_day_of_month(year, month)
+    while start <= end:
+        yield start.strftime("%Y-%m-%d")
+        start += timedelta(days=1)
 
-
-def previous_month(year, month):
-
-    if month == 1:
-        return year - 1, 12
-
-    return year, month - 1
-
-
-# ============================================================
-# LOAD EXISTING MONTH
-# ============================================================
+def month_filename(year, month):
+    return f"{year}-{month:02d}.json"
 
 def load_existing_month(filename):
-
-    path = os.path.join(
-        OUTPUT_DIR,
-        filename
-    )
-
+    path = os.path.join(OUTPUT_DIR, filename)
     if not os.path.exists(path):
         return {}
 
     try:
-
-        with open(
-            path,
-            "r",
-            encoding="utf-8"
-        ) as file:
-            data = json.load(file)
-
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
     except Exception as exc:
-
-        log(
-            f"⚠️ Could not read "
-            f"{filename}: {exc}"
-        )
-
+        log(f"⚠️ Could not read {filename}: {exc}")
         return {}
 
     result = {}
-
     for raw_movie, dates in data.items():
-
         if raw_movie == "lastUpdated":
             continue
-
-        if not isinstance(
-            dates,
-            dict
-        ):
+        if not isinstance(dates, dict):
             continue
-
-        movie = normalize_movie_key(
-            raw_movie
-        )
-
-        result.setdefault(
-            movie,
-            {}
-        )
-
+        movie = normalize_movie_key(raw_movie)
+        result.setdefault(movie, {})
         for date_str, chain_data in dates.items():
-
-            if isinstance(
-                chain_data,
-                list
-            ):
-
-                result[movie][
-                    date_str
-                ] = chain_data
-
-            elif isinstance(
-                chain_data,
-                dict
-            ):
-
-                result[movie][
-                    date_str
-                ] = [
-                    chain_data.get(
-                        chain
-                    )
-                    for chain in CHAIN_ORDER
-                ]
-
+            if isinstance(chain_data, list):
+                result[movie][date_str] = chain_data
+            elif isinstance(chain_data, dict):
+                result[movie][date_str] = [chain_data.get(chain) for chain in CHAIN_ORDER]
     return result
-
-
-# ============================================================
-# GET REBUILD DATES
-# ============================================================
-
-def get_rebuild_dates():
-
-    today = datetime.now().date()
-
-    # Current month
-    current_year = today.year
-    current_month = today.month
-
-    # Previous month
-    prev_year, prev_month = previous_month(
-        current_year,
-        current_month
-    )
-
-    dates = []
-
-    # --------------------------------------------------------
-    # Previous month: ENTIRE month
-    # --------------------------------------------------------
-
-    prev_start = month_start(
-        prev_year,
-        prev_month
-    )
-
-    current_start = month_start(
-        current_year,
-        current_month
-    )
-
-    d = prev_start
-
-    while d < current_start:
-
-        dates.append(
-            d.strftime("%Y-%m-%d")
-        )
-
-        d += timedelta(days=1)
-
-    # --------------------------------------------------------
-    # Current month: 1st → today + 5 days
-    #
-    # This keeps the advance window current.
-    # --------------------------------------------------------
-
-    end_date = today + timedelta(days=5)
-
-    d = current_start
-
-    while d <= end_date:
-
-        dates.append(
-            d.strftime("%Y-%m-%d")
-        )
-
-        d += timedelta(days=1)
-
-    return dates
-
 
 # ============================================================
 # MAIN
 # ============================================================
 
 def main():
-
     today = datetime.now().date()
 
-    prev_year, prev_month = previous_month(
-        today.year,
-        today.month
-    )
+    prev_year, prev_month = (today.year, today.month - 1) if today.month > 1 else (today.year - 1, 12)
+    curr_year, curr_month = today.year, today.month
 
-    log(
-        f"🔄 Rebuilding previous month: "
-        f"{prev_year}-{prev_month:02d}"
-    )
+    log(f"🔄 Rebuilding previous month: {prev_year}-{prev_month:02d}")
+    log(f"🔄 Rebuilding current month:  {curr_year}-{curr_month:02d}")
 
-    log(
-        f"🔄 Rebuilding current month: "
-        f"{today.year}-{today.month:02d}"
-    )
+    # ------------------------------------------------------------------
+    # Determine which months need to be fetched
+    # ------------------------------------------------------------------
+    months_to_fetch = set()
 
-    dates_to_fetch = get_rebuild_dates()
+    # Always fetch previous and current months
+    months_to_fetch.add((prev_year, prev_month))
+    months_to_fetch.add((curr_year, curr_month))
 
-    log(
-        f"📅 Total source dates to check: "
-        f"{len(dates_to_fetch)}"
-    )
+    # Backfill missing older months (from BACKFILL_START to previous month, exclusive of current/previous)
+    current_month_start = datetime(curr_year, curr_month, 1).date()
+    d = BACKFILL_START
+    while d < current_month_start:
+        y, m = d.year, d.month
+        # Skip if this month is the previous or current (already covered)
+        if (y, m) not in months_to_fetch:
+            filename = month_filename(y, m)
+            if not os.path.exists(os.path.join(OUTPUT_DIR, filename)):
+                months_to_fetch.add((y, m))
+                log(f"📂 Missing {filename} → will backfill")
+        # Advance to next month
+        if m == 12:
+            d = datetime(y + 1, 1, 1).date()
+        else:
+            d = datetime(y, m + 1, 1).date()
 
-    # --------------------------------------------------------
-    # Load ONLY months that are being rebuilt.
-    # Other historical months remain untouched.
-    # --------------------------------------------------------
+    # ------------------------------------------------------------------
+    # Build list of date strings to fetch
+    # ------------------------------------------------------------------
+    dates_to_fetch = set()
 
-    rebuild_months = {
-        f"{prev_year}-{prev_month:02d}.json",
-        f"{today.year}-{today.month:02d}.json",
-    }
+    for year, month in months_to_fetch:
+        if year == curr_year and month == curr_month:
+            # Current month: from 1st to today + 5 days
+            start = datetime(year, month, 1).date()
+            end = today + timedelta(days=5)
+            d = start
+            while d <= end:
+                dates_to_fetch.add(d.strftime("%Y-%m-%d"))
+                d += timedelta(days=1)
+        else:
+            # Full month
+            for date_str in month_range(year, month):
+                dates_to_fetch.add(date_str)
 
-    existing_data = {}
+    log(f"📅 Total dates to check: {len(dates_to_fetch)}")
 
-    for filename in rebuild_months:
-
-        existing_data[filename] = (
-            load_existing_month(
-                filename
-            )
-        )
-
-    # --------------------------------------------------------
-    # FETCH
-    # --------------------------------------------------------
-
-    fetched_results = {}
-
-    log(
-        f"🚀 Fetching with "
-        f"{MAX_WORKERS} workers..."
-    )
+    # ------------------------------------------------------------------
+    # Fetch all dates concurrently
+    # ------------------------------------------------------------------
+    fetched_results = {}  # date_str -> data dict
 
     def fetch_wrapper(date_str):
-
         with requests.Session() as session:
-
-            return (
-                date_str,
-                fetch_date(
-                    date_str,
-                    session
-                )
-            )
+            return date_str, fetch_date(date_str, session)
 
     total = len(dates_to_fetch)
     completed = 0
 
-    with ThreadPoolExecutor(
-        max_workers=MAX_WORKERS
-    ) as executor:
+    log(f"🚀 Fetching with {MAX_WORKERS} workers...")
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+        futures = {executor.submit(fetch_wrapper, date_str): date_str for date_str in dates_to_fetch}
 
-        futures = {
-            executor.submit(
-                fetch_wrapper,
-                date_str
-            ): date_str
-
-            for date_str in dates_to_fetch
-        }
-
-        for future in as_completed(
-            futures
-        ):
-
-            date_str = futures[
-                future
-            ]
-
+        for future in as_completed(futures):
+            date_str = futures[future]
             completed += 1
 
             try:
-
-                date, result = (
-                    future.result()
-                )
-
-                status = result.get(
-                    "status"
-                )
+                date, result = future.result()
+                status = result.get("status")
 
                 if status == "missing":
-
-                    log(
-                        f"[{completed}/{total}] "
-                        f"⚪ {date} – "
-                        f"source missing"
-                    )
-
-                    # IMPORTANT:
-                    # Do NOT manufacture empty data.
-                    # Missing source = no data for rebuild.
-
+                    log(f"[{completed}/{total}] ⚪ {date} – source missing")
                 elif status == "success":
-
-                    fetched_results[
-                        date
-                    ] = result.get(
-                        "data",
-                        {}
-                    )
-
-                    log(
-                        f"[{completed}/{total}] "
-                        f"✅ {date} – "
-                        f"{result.get('parsed_movies', 0)} movies"
-                    )
-
+                    fetched_results[date] = result.get("data", {})
+                    log(f"[{completed}/{total}] ✅ {date} – {result.get('parsed_movies', 0)} movies")
                 else:
-
-                    log(
-                        f"[{completed}/{total}] "
-                        f"❌ {date} – "
-                        f"{result.get('error', 'unknown')}"
-                    )
-
+                    log(f"[{completed}/{total}] ❌ {date} – {result.get('error', 'unknown')}")
             except Exception as exc:
+                log(f"[{completed}/{total}] ❌ {date_str} – worker error: {exc}")
 
-                log(
-                    f"[{completed}/{total}] "
-                    f"❌ {date_str} – "
-                    f"worker error: {exc}"
-                )
+            if completed % 10 == 0 or completed == total:
+                log(f"⏳ Progress: {completed}/{total} ({100 * completed // total}%)")
 
-            if (
-                completed % 10 == 0
-                or completed == total
-            ):
+    log(f"✅ Successfully fetched {len(fetched_results)} dates")
 
-                log(
-                    f"⏳ Progress: "
-                    f"{completed}/{total} "
-                    f"({100 * completed // total}%)"
-                )
+    # ------------------------------------------------------------------
+    # Group fetched data by month and save each month
+    # ------------------------------------------------------------------
+    # Group by year-month
+    month_groups = defaultdict(list)
+    for date_str in fetched_results:
+        y, m, _ = date_str.split("-")
+        month_groups[(int(y), int(m))].append(date_str)
 
-    log(
-        f"✅ Successfully fetched "
-        f"{len(fetched_results)} dates"
-    )
+    if not month_groups:
+        log("⚠️ No data fetched – nothing to save.")
+        return
 
-    # ========================================================
-    # REBUILD MONTH DATA FROM SCRATCH
-    # ========================================================
+    for (year, month), date_list in month_groups.items():
+        filename = month_filename(year, month)
+        log(f"💾 Saving {filename}...")
 
-    rebuilt_months = defaultdict(
-        lambda: defaultdict(dict)
-    )
+        # Load existing month data (if any)
+        old_data = load_existing_month(filename)
 
-    for date_str, movie_data in (
-        fetched_results.items()
-    ):
+        # Build final data: keep old dates that were not fetched, overwrite fetched dates with new data
+        final_data = defaultdict(dict)
 
-        if not movie_data:
-            continue
-
-        year, month, _ = (
-            date_str.split("-")
-        )
-
-        filename = (
-            f"{year}-{month}.json"
-        )
-
-        for raw_movie, shows in (
-            movie_data.items()
-        ):
-
-            if not isinstance(
-                shows,
-                list
-            ):
-                continue
-
-            movie = normalize_movie_key(
-                raw_movie
-            )
-
-            stats = process_day(
-                shows
-            )
-
-            if not stats:
-                continue
-
-            # Only store useful results.
-            if not any(
-                item is not None
-                for item in stats
-            ):
-                continue
-
-            rebuilt_months[
-                filename
-            ][movie][
-                date_str
-            ] = stats
-
-    # ========================================================
-    # SAVE REBUILT MONTHS
-    # ========================================================
-
-    for filename in rebuild_months:
-
-        month_data = rebuilt_months.get(
-            filename,
-            {}
-        )
-
-        # ----------------------------------------------------
-        # IMPORTANT:
-        #
-        # We rebuild the month completely from source.
-        #
-        # However, a missing source file must NOT cause
-        # previously known date data to disappear.
-        #
-        # Therefore:
-        # - fetched date → replace with fresh source data
-        # - missing date → retain existing date
-        #
-        # This protects historical data when the CDN no
-        # longer contains an old Detailed.json.
-        # ----------------------------------------------------
-
-        old_data = existing_data.get(
-            filename,
-            {}
-        )
-
-        final_data = {}
-
-        # ----------------------------------------------------
-        # First copy old dates only for dates whose source
-        # was missing/unavailable.
-        # ----------------------------------------------------
-
-        fetched_dates_for_month = {
-            date_str
-            for date_str in fetched_results
-            if date_str.startswith(
-                filename[:7]
-            )
-        }
-
-        missing_dates_for_month = {
-            date_str
-            for date_str in dates_to_fetch
-            if date_str.startswith(
-                filename[:7]
-            )
-            and date_str
-            not in fetched_dates_for_month
-        }
-
+        # First, copy old data for dates not in fetched_results (missing from source)
+        fetched_dates_for_month = set(date_list)
         for movie, dates in old_data.items():
+            for date_str, value in dates.items():
+                if date_str not in fetched_dates_for_month:
+                    final_data[movie][date_str] = value
 
-            if not isinstance(
-                dates,
-                dict
-            ):
+        # Now add/replace with freshly fetched data
+        for date_str in fetched_dates_for_month:
+            movie_data = fetched_results.get(date_str)
+            if not movie_data:
                 continue
+            for raw_movie, shows in movie_data.items():
+                if not isinstance(shows, list):
+                    continue
+                movie = normalize_movie_key(raw_movie)
+                stats = process_day(shows)
+                if stats and any(item is not None for item in stats):
+                    final_data[movie][date_str] = stats
 
-            for date_str, value in dates.items():
-
-                if date_str in missing_dates_for_month:
-
-                    final_data.setdefault(
-                        movie,
-                        {}
-                    )[date_str] = value
-
-        # ----------------------------------------------------
-        # Add fresh rebuilt source data.
-        # ----------------------------------------------------
-
-        for movie, dates in (
-            month_data.items()
-        ):
-
-            final_data.setdefault(
-                movie,
-                {}
-            )
-
-            for date_str, value in dates.items():
-
-                final_data[movie][
-                    date_str
-                ] = value
-
-        # ----------------------------------------------------
-        # Sort movies and dates for stable JSON.
-        # ----------------------------------------------------
-
+        # Sort movies and dates for stable output
         sorted_output = {}
-
-        for movie in sorted(
-            final_data.keys(),
-            key=lambda x: x.lower()
-        ):
-
+        for movie in sorted(final_data.keys(), key=lambda x: x.lower()):
             sorted_output[movie] = {}
+            for date_str in sorted(final_data[movie].keys()):
+                sorted_output[movie][date_str] = final_data[movie][date_str]
 
-            for date_str in sorted(
-                final_data[movie].keys()
-            ):
+        # Write JSON (single-line, compact)
+        output_json = json.dumps(sorted_output, ensure_ascii=False, separators=(",", ":"))
+        path = os.path.join(OUTPUT_DIR, filename)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(output_json)
 
-                sorted_output[movie][
-                    date_str
-                ] = final_data[movie][
-                    date_str
-                ]
+        log(f"✅ Saved {filename} ({len(sorted_output)} movies)")
 
-        # ----------------------------------------------------
-        # SINGLE-LINE JSON
-        #
-        # No indent.
-        # No newlines.
-        # No spaces after separators.
-        # ----------------------------------------------------
-
-        output_json = json.dumps(
-            sorted_output,
-            ensure_ascii=False,
-            separators=(",", ":")
-        )
-
-        path = os.path.join(
-            OUTPUT_DIR,
-            filename
-        )
-
-        with open(
-            path,
-            "w",
-            encoding="utf-8"
-        ) as file:
-
-            file.write(
-                output_json
-            )
-
-        log(
-            f"💾 Rebuilt → {path} "
-            f"({len(sorted_output)} movies)"
-        )
-
-    log("🎉 Rebuild complete!")
-
+    log("🎉 Rebuild and backfill complete!")
 
 # ============================================================
 # ENTRY
