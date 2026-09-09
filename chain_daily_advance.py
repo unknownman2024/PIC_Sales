@@ -861,102 +861,6 @@ def daywise_filename(
 
 
 # ============================================================
-# LOAD EXISTING MONTH
-# ============================================================
-
-def load_existing_month(
-    filename
-):
-    path = os.path.join(
-        OUTPUT_DIR,
-        filename
-    )
-
-    if not os.path.exists(
-        path
-    ):
-        return {}
-
-    try:
-        with open(
-            path,
-            "r",
-            encoding="utf-8"
-        ) as f:
-            data = json.load(
-                f
-            )
-
-    except Exception as exc:
-        log(
-            f"⚠️ Could not read "
-            f"{filename}: {exc}"
-        )
-
-        return {}
-
-    result = {}
-
-    for (
-        raw_movie,
-        dates
-    ) in data.items():
-
-        # Monthly metadata
-        if raw_movie in {
-            "lastUpdated",
-            "date"
-        }:
-            continue
-
-        if not isinstance(
-            dates,
-            dict
-        ):
-            continue
-
-        movie = (
-            normalize_movie_key(
-                raw_movie
-            )
-        )
-
-        result.setdefault(
-            movie,
-            {}
-        )
-
-        for (
-            date_str,
-            chain_data
-        ) in dates.items():
-
-            if isinstance(
-                chain_data,
-                list
-            ):
-                result[movie][
-                    date_str
-                ] = chain_data
-
-            elif isinstance(
-                chain_data,
-                dict
-            ):
-                result[movie][
-                    date_str
-                ] = [
-                    chain_data.get(
-                        chain
-                    )
-                    for chain
-                    in CHAIN_ORDER
-                ]
-
-    return result
-
-
-# ============================================================
 # SAVE ONE DAY-WISE FILE
 # ============================================================
 
@@ -1430,7 +1334,7 @@ def main():
         return
 
     # ============================================================
-    # SAVE DAY-WISE FILES
+    # SAVE DAY-WISE FILES (fresh overwrite)
     # ============================================================
 
     log(
@@ -1465,7 +1369,7 @@ def main():
         )
 
     # ============================================================
-    # SAVE MONTHLY FILES
+    # SAVE MONTHLY FILES – FORCE REBUILD (no merging)
     # ============================================================
 
     for (
@@ -1479,67 +1383,18 @@ def main():
         )
 
         log(
-            f"💾 Saving {filename}..."
+            f"💾 Rebuilding {filename} from scratch..."
         )
 
         # --------------------------------------------------------
-        # Load existing month
+        # Build month data only from fetched dates
         # --------------------------------------------------------
 
-        old_data = (
-            load_existing_month(
-                filename
-            )
-        )
-
-        # --------------------------------------------------------
-        # Build final month data
-        #
-        # Keep old dates which were not fetched.
-        # Replace dates that were freshly fetched.
-        # --------------------------------------------------------
-
-        final_data = defaultdict(
+        month_data = defaultdict(
             dict
         )
 
-        fetched_dates_for_month = set(
-            date_list
-        )
-
-        # --------------------------------------------------------
-        # Copy old data for dates which were not fetched
-        # --------------------------------------------------------
-
-        for (
-            movie,
-            dates
-        ) in old_data.items():
-
-            for (
-                date_str,
-                value
-            ) in dates.items():
-
-                if (
-                    date_str
-                    not in
-                    fetched_dates_for_month
-                ):
-
-                    final_data[
-                        movie
-                    ][
-                        date_str
-                    ] = value
-
-        # --------------------------------------------------------
-        # Add / replace freshly fetched dates
-        # --------------------------------------------------------
-
-        for date_str in (
-            fetched_dates_for_month
-        ):
+        for date_str in date_list:
 
             result = fetched_results.get(
                 date_str
@@ -1584,7 +1439,7 @@ def main():
                         for item in stats
                     )
                 ):
-                    final_data[
+                    month_data[
                         movie
                     ][
                         date_str
@@ -1597,7 +1452,7 @@ def main():
         sorted_movies = {}
 
         for movie in sorted(
-            final_data.keys(),
+            month_data.keys(),
             key=lambda x: x.lower()
         ):
 
@@ -1606,7 +1461,7 @@ def main():
             ] = {}
 
             for date_str in sorted(
-                final_data[
+                month_data[
                     movie
                 ].keys()
             ):
@@ -1615,17 +1470,14 @@ def main():
                     movie
                 ][
                     date_str
-                ] = final_data[
+                ] = month_data[
                     movie
                 ][
                     date_str
                 ]
 
         # --------------------------------------------------------
-        # Monthly metadata
-        #
-        # IMPORTANT:
-        # This is CURRENT IST time, not source lastUpdated.
+        # Monthly metadata – current IST time
         # --------------------------------------------------------
 
         final_output = {
