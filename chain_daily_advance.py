@@ -1118,7 +1118,7 @@ def main():
         ):
 
             # Current month:
-            # 1st -> today + 5 days
+            # 1st -> today + 30 days
 
             start = datetime(
                 year,
@@ -1129,7 +1129,7 @@ def main():
             end = (
                 today
                 + timedelta(
-                    days=5
+                    days=30
                 )
             )
 
