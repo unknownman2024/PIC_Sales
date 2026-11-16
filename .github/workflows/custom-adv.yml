@@ -1,0 +1,30 @@
+name: Trigger Advance Pipeline
+
+on:
+  workflow_dispatch:
+    inputs:
+      date_code:
+        description: "Date (YYYYMMDD)"
+        required: true
+        default: "20261217"
+
+jobs:
+  trigger:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install requests
+
+      - name: Trigger GitLab pipeline
+        env:
+          GITLAB_PROJECT_ID: ${{ secrets.GITLAB_PROJECT_ID }}
+          GITLAB_TOKEN: ${{ secrets.GITLAB_TOKEN }}
+          DATE_CODE: ${{ inputs.date_code }}
+        run: python trigger_pipeline.py
